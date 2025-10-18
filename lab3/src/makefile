@@ -2,7 +2,7 @@ CC=gcc
 CFLAGS=-I.
 
 # Основная цель - сборка всех программ
-all: sequential_min_max parallel_min_max
+all: sequential_min_max parallel_min_max run_sequential
 
 # sequential_min_max - последовательная версия
 sequential_min_max : utils.o find_min_max.o utils.h find_min_max.h
@@ -11,6 +11,10 @@ sequential_min_max : utils.o find_min_max.o utils.h find_min_max.h
 # parallel_min_max - параллельная версия  
 parallel_min_max : utils.o find_min_max.o utils.h find_min_max.h
 	$(CC) -o parallel_min_max parallel_min_max.c utils.o find_min_max.o $(CFLAGS)
+
+# run_sequential - программа для запуска sequential_min_max в отдельном процессе
+run_sequential : 
+	$(CC) -o run_sequential run_sequential.c $(CFLAGS)
 
 # Цели для компиляции объектных файлов:
 
@@ -24,5 +28,4 @@ find_min_max.o : utils.h find_min_max.h
 
 # Очистка - удаление всех сгенерированных файлов
 clean :
-	rm -f utils.o find_min_max.o sequential_min_max parallel_min_max
-
+	rm -f utils.o find_min_max.o sequential_min_max parallel_min_max run_sequential
