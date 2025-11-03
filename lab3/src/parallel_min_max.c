@@ -1,5 +1,7 @@
 #include <ctype.h>
 #include <limits.h>
+#include <errno.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,11 +19,19 @@
 #include "find_min_max.h"
 #include "utils.h"
 
+static volatile sig_atomic_t timed_out = 0;
+
+static void alarm_handler(int signum) {
+  (void)signum;
+  timed_out = 1;
+}
+
 int main(int argc, char **argv) {
   int seed = -1;
   int array_size = -1;
   int pnum = -1;
   bool with_files = false;
+  int timeout = 0;
 
   while (true) {
     int current_optind = optind ? optind : 1;
@@ -29,6 +39,7 @@ int main(int argc, char **argv) {
     static struct option options[] = {{"seed", required_argument, 0, 0},
                                       {"array_size", required_argument, 0, 0},
                                       {"pnum", required_argument, 0, 0},
+                                      {"timeout", required_argument, 0, 0},
                                       {"by_files", no_argument, 0, 'f'},
                                       {0, 0, 0, 0}};
 
@@ -62,6 +73,13 @@ int main(int argc, char **argv) {
             }
             break;
           case 3:
+            timeout = atoi(optarg);
+            if (timeout < 0) {
+              printf("timeout must be non-negative\n");
+              return 1;
+            }
+            break;
+          case 4:
             with_files = true;
             break;
 
@@ -95,6 +113,15 @@ int main(int argc, char **argv) {
   int *array = malloc(sizeof(int) * array_size);
   GenerateArray(array, array_size, seed);
   int active_child_processes = 0;
+  bool children_killed = false;
+
+  pid_t *child_pids = malloc(sizeof(pid_t) * pnum);
+  if (child_pids == NULL) {
+    printf("Failed to allocate memory for child pids\n");
+    free(array);
+    return 1;
+  }
+  memset(child_pids, 0, sizeof(pid_t) * pnum);
 
   // Create pipes for communication if not using files
   int *pipe_fds = NULL;
@@ -103,6 +130,15 @@ int main(int argc, char **argv) {
     for (int i = 0; i < pnum; i++) {
       if (pipe(pipe_fds + 2 * i) < 0) {
         printf("Failed to create pipe\n");
+        free(array);
+        free(child_pids);
+        if (pipe_fds != NULL) {
+          for (int j = 0; j < i; j++) {
+            close(pipe_fds[2 * j]);
+            close(pipe_fds[2 * j + 1]);
+          }
+          free(pipe_fds);
+        }
         return 1;
       }
     }
@@ -110,6 +146,11 @@ int main(int argc, char **argv) {
 
   struct timeval start_time;
   gettimeofday(&start_time, NULL);
+
+  if (timeout > 0) {
+    signal(SIGALRM, alarm_handler);
+    alarm(timeout);
+  }
 
   // Calculate the size of each part
   int part_size = array_size / pnum;
@@ -158,9 +199,16 @@ int main(int argc, char **argv) {
         
         free(array);
         exit(0);
+      } else {
+        child_pids[i] = child_pid;
       }
     } else {
       printf("Fork failed!\n");
+      for (int j = 0; j < i; j++) {
+        kill(child_pids[j], SIGKILL);
+      }
+      free(array);
+      free(child_pids);
       return 1;
     }
   }
@@ -174,9 +222,43 @@ int main(int argc, char **argv) {
   }
 
   while (active_child_processes > 0) {
-    wait(NULL);
-    active_child_processes -= 1;
+    int status;
+    pid_t finished_pid = waitpid(-1, &status, WNOHANG);
+    if (finished_pid > 0) {
+      active_child_processes -= 1;
+      for (int i = 0; i < pnum; i++) {
+        if (child_pids[i] == finished_pid) {
+          child_pids[i] = 0;
+          break;
+        }
+      }
+      continue;
+    }
+
+    if (finished_pid == -1) {
+      if (errno == ECHILD) {
+        active_child_processes = 0;
+        break;
+      }
+    }
+
+    if (timed_out && !children_killed) {
+      for (int i = 0; i < pnum; i++) {
+        if (child_pids[i] > 0) {
+          kill(child_pids[i], SIGKILL);
+        }
+      }
+      children_killed = true;
+    }
+
+    usleep(1000);
   }
+
+  if (timeout > 0) {
+    alarm(0);
+  }
+
+  free(child_pids);
 
   struct MinMax min_max;
   min_max.min = INT_MAX;
